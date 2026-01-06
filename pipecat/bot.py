@@ -72,10 +72,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     from pipecat.services.openai.base_llm import BaseOpenAILLMService
 
     llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        base_url="https://openrouter.ai/api/v1",
-        model="openai/gpt-4o-mini",  # or any other model from OpenRouter
-        params=BaseOpenAILLMService.InputParams(max_tokens=2048)  # Reduced to work with your credits
+        api_key="ollama",  
+        base_url="http://localhost:11434/v1",  # Ollama's API endpoint
+        model="llama3.2:1b",  # Local Ollama model
+        params=BaseOpenAILLMService.InputParams(max_tokens=2048)
     )
 
     messages = [
