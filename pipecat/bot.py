@@ -1,25 +1,7 @@
-#
-# Copyright (c) 2024–2025, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
-"""Pipecat Quickstart Example.
-
-The example runs a simple voice AI bot that you can connect to using your
-browser and speak with it. You can also deploy this bot to Pipecat Cloud.
-
-Required AI services:
-- Deepgram (Speech-to-Text)
-- OpenAI (LLM)
-- Cartesia (Text-to-Speech)
-
-Run the bot using::
-
-    uv run bot.py
-"""
-
 import os
+import asyncio
+import numpy as np
+import whisper
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -37,7 +19,8 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 logger.info("✅ Silero VAD model loaded")
 
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import LLMRunFrame, Frame, AudioRawFrame, TranscriptionFrame
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 logger.info("Loading pipeline components...")
 from pipecat.pipeline.pipeline import Pipeline
@@ -48,7 +31,6 @@ from pipecat.processors.aggregators.llm_response_universal import LLMContextAggr
 from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
@@ -56,13 +38,61 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 
 logger.info("✅ All components loaded successfully!")
 
+# Custom Whisper STT Processor
+class WhisperSTTService(FrameProcessor):
+    def __init__(self, model_size: str = "base"):
+        super().__init__()
+        logger.info(f"Loading Whisper {model_size} model...")
+        self._model = whisper.load_model(model_size)
+        self._audio_buffer = bytearray()
+        self._sample_rate = 16000
+        logger.info("✅ Whisper model loaded")
+    
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        
+        if isinstance(frame, AudioRawFrame):
+            # Accumulate audio
+            self._audio_buffer.extend(frame.audio)
+        
+            # Process when we have ~1 second of audio (16000 samples * 2 bytes)
+            if len(self._audio_buffer) >= 32000:
+                try:
+                    # Convert bytes to numpy array
+                    audio_np = np.frombuffer(bytes(self._audio_buffer), dtype=np.int16).astype(np.float32) / 32768.0
+                    
+                    # Transcribe
+                    result = await asyncio.to_thread(
+                        self._model.transcribe,
+                        audio_np,
+                        language="en",
+                        fp16=False
+                    )
+                    
+                    text = result["text"].strip()
+                    if text:
+                        logger.info(f"🎤 Whisper transcription: {text}")
+                        # Use current time in ISO format for timestamp
+                        import datetime
+                        timestamp = datetime.datetime.now().isoformat()
+                        await self.push_frame(TranscriptionFrame(text=text, user_id="user", timestamp=timestamp))
+                    
+                    # Clear buffer
+                    self._audio_buffer.clear()
+                    
+                except Exception as e:
+                    logger.error(f"Whisper transcription error: {e}")
+                    self._audio_buffer.clear()
+        
+        await self.push_frame(frame, direction)
+
 load_dotenv(override=True)
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
 
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+    stt = WhisperSTTService(model_size="base")
 
     tts = DeepgramTTSService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),

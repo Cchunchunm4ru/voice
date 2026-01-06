@@ -4,6 +4,7 @@ pipecat-ai==0.0.98
 # AI Services
 deepgram-sdk==3.11.0
 openai
+openai-whisper
 
 # Server and API
 fastapi
@@ -19,6 +20,11 @@ pipecat-ai-small-webrtc-prebuilt
 onnxruntime
 transformers
 numpy==2.2.6
+
+# PyTorch and Llama
+torch
+accelerate
+sentencepiece
 
 # Environment and Logging
 python-dotenv
