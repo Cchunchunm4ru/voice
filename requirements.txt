@@ -1,4 +1,28 @@
-pipecat-ai[webrtc,daily,silero,deepgram,openai,cartesia,local-smart-turn-v3,runner]
-pipecat-ai-cli
+# Core Pipecat framework
+pipecat-ai==0.0.98
+
+# AI Services
+deepgram-sdk==3.11.0
+openai
+
+# Server and API
+fastapi
+uvicorn
+aiohttp
+
+# WebRTC Transport (instead of Daily - no Rust compiler needed on Windows)
+aiortc
+opencv-python
+pipecat-ai-small-webrtc-prebuilt
+
+# Smart Turn Analyzer and VAD
+onnxruntime
+transformers
+numpy==2.2.6
+
+# Environment and Logging
 python-dotenv
 loguru
+
+# Required for proper functioning
+protobuf==5.29.3

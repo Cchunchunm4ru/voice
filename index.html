@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pipecat Voice AI Bot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 0.9em;
+        }
+
+        .status {
+            text-align: center;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 25px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .status.disconnected {
+            background: #fee;
+            color: #c33;
+        }
+
+        .status.connecting {
+            background: #ffeaa7;
+            color: #d63031;
+        }
+
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        button {
+            padding: 15px 30px;
+            font-size: 1.1em;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-connect {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-disconnect {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+        }
+
+        .btn-mute {
+            background: #95a5a6;
+            color: white;
+        }
+
+        .btn-unmute {
+            background: #3498db;
+            color: white;
+        }
+
+        .info {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+
+        .info h3 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+
+        .info ul {
+            list-style: none;
+            color: #666;
+        }
+
+        .info li {
+            padding: 5px 0;
+            padding-left: 20px;
+            position: relative;
+        }
+
+        .info li:before {
+            content: "✓";
+            position: absolute;
+            left: 0;
+            color: #667eea;
+            font-weight: bold;
+        }
+
+        .visual-indicator {
+            width: 100%;
+            height: 60px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            margin: 20px 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+
+        .audio-bars {
+            display: flex;
+            gap: 5px;
+            height: 100%;
+            align-items: center;
+        }
+
+        .bar {
+            width: 4px;
+            background: #667eea;
+            border-radius: 2px;
+            animation: pulse 0.8s ease-in-out infinite;
+        }
+
+        .bar:nth-child(2) { animation-delay: 0.1s; }
+        .bar:nth-child(3) { animation-delay: 0.2s; }
+        .bar:nth-child(4) { animation-delay: 0.3s; }
+        .bar:nth-child(5) { animation-delay: 0.4s; }
+
+        @keyframes pulse {
+            0%, 100% { height: 20%; }
+            50% { height: 80%; }
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 15px;
+            border-left: 4px solid #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ Pipecat Voice AI</h1>
+        <p class="subtitle">Real-time voice conversation bot</p>
+
+        <div id="status" class="status disconnected">
+            Disconnected
+        </div>
+
+        <div class="visual-indicator">
+            <div id="audioBars" class="audio-bars hidden">
+                <div class="bar"></div>
+                <div class="bar"></div>
+                <div class="bar"></div>
+                <div class="bar"></div>
+                <div class="bar"></div>
+            </div>
+            <div id="idleText">Click Connect to start</div>
+        </div>
+
+        <div class="controls">
+            <button id="connectBtn" class="btn-connect">Connect</button>
+            <button id="disconnectBtn" class="btn-disconnect hidden" disabled>Disconnect</button>
+            <button id="muteBtn" class="btn-mute hidden" disabled>Mute Microphone</button>
+        </div>
+
+        <div id="errorMessage" class="error-message hidden"></div>
+
+        <div class="info">
+            <h3>How to use:</h3>
+            <ul>
+                <li>Click "Connect" to start the voice session</li>
+                <li>Allow microphone access when prompted</li>
+                <li>Speak naturally with the AI assistant</li>
+                <li>Click "Disconnect" when finished</li>
+            </ul>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/@daily-co/daily-js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
