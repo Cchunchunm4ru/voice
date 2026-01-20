@@ -5,7 +5,7 @@ import whisper
 
 from dotenv import load_dotenv
 from loguru import logger
-
+from pipecat.services.riva import RivaSTTService
 print("🚀 Starting Pipecat bot...")
 print("⏳ Loading models and imports (20 seconds, first run only)\n")
 
@@ -38,61 +38,17 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 
 logger.info("✅ All components loaded successfully!")
 
-# Custom Whisper STT Processor
-class WhisperSTTService(FrameProcessor):
-    def __init__(self, model_size: str = "base"):
-        super().__init__()
-        logger.info(f"Loading Whisper {model_size} model...")
-        self._model = whisper.load_model(model_size)
-        self._audio_buffer = bytearray()
-        self._sample_rate = 16000
-        logger.info("✅ Whisper model loaded")
-    
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-        
-        if isinstance(frame, AudioRawFrame):
-            # Accumulate audio
-            self._audio_buffer.extend(frame.audio)
-        
-            # Process when we have ~1 second of audio (16000 samples * 2 bytes)
-            if len(self._audio_buffer) >= 32000:
-                try:
-                    # Convert bytes to numpy array
-                    audio_np = np.frombuffer(bytes(self._audio_buffer), dtype=np.int16).astype(np.float32) / 32768.0
-                    
-                    # Transcribe
-                    result = await asyncio.to_thread(
-                        self._model.transcribe,
-                        audio_np,
-                        language="en",
-                        fp16=False
-                    )
-                    
-                    text = result["text"].strip()
-                    if text:
-                        logger.info(f"🎤 Whisper transcription: {text}")
-                        # Use current time in ISO format for timestamp
-                        import datetime
-                        timestamp = datetime.datetime.now().isoformat()
-                        await self.push_frame(TranscriptionFrame(text=text, user_id="user", timestamp=timestamp))
-                    
-                    # Clear buffer
-                    self._audio_buffer.clear()
-                    
-                except Exception as e:
-                    logger.error(f"Whisper transcription error: {e}")
-                    self._audio_buffer.clear()
-        
-        await self.push_frame(frame, direction)
-
 load_dotenv(override=True)
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
 
-    stt = WhisperSTTService(model_size="base")
+    stt = RivaSTTService(
+        api_key=os.getenv("NVIDIA_API_KEY"),
+        url="grpc.nvcf.nvidia.com:443", # For Cloud NIM
+        model_name="nvidia/parakeet-ctc-1.1b-asr" 
+    )
 
     tts = DeepgramTTSService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
