@@ -22,9 +22,14 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 logger.info("✅ Silero VAD model loaded")
 
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMRunFrame, Frame, AudioRawFrame, TranscriptionFrame
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.frames.frames import LLMRunFrame, Frame, AudioRawFrame, TranscriptionFrame
+from pipecat.frames.frames import AudioRawFrame, TranscriptionFrame
+
+class Frame:
+    pass
+
+class LLMRunFrame(Frame):
+    pass
+
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 logger.info("Loading pipeline components...")
@@ -50,6 +55,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     import soundfile as sf
     import librosa
     import torch
+    import time 
 
     class AudioChunkIterator:
         def __init__(self, samples, chunk_len_in_secs, sample_rate):
@@ -81,13 +87,15 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             self.sample_rate = sample_rate
             self.chunk_len_in_secs = chunk_len_in_secs
             self.context_len_in_secs = context_len_in_secs
+            self.audio_frame_count = 0
+            self.last_log_time = None
 
         def link(self, next_processor):
             self._next = next_processor
 
         async def process(self, frame, direction="forward"):
             from loguru import logger
-            logger.debug(f"customSTTService.process called with frame type: {type(frame).__name__} | frame={frame}")
+            logger.info(f"[RTVI] Received frame: {type(frame).__name__}")
             # Log all attributes for debugging
             for attr in dir(frame):
                 if not attr.startswith("_"):
@@ -96,6 +104,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                     except Exception:
                         pass
             if isinstance(frame, AudioRawFrame):
+                logger.info(f"[AUDIO FRAME] Received AudioRawFrame: sample_rate={getattr(frame, 'sample_rate', None)}, samples_shape={getattr(frame, 'samples', None).shape if hasattr(frame, 'samples') else 'N/A'}")
+                self.audio_frame_count += 1
+                now = time.time()
+                if self.last_log_time is None:
+                    self.last_log_time = now
+                # Log every 10 frames or every 10 seconds
+                if self.audio_frame_count % 10 == 0 or (now - self.last_log_time) > 10:
+                    logger.info(f"Received {self.audio_frame_count} AudioRawFrame(s) in the last {int(now - self.last_log_time)} seconds.")
+                    self.last_log_time = now
+                    self.audio_frame_count = 0
                 logger.debug(f"AudioRawFrame received: samples shape={getattr(frame, 'samples', None).shape if hasattr(frame, 'samples') else 'N/A'}, sample_rate={getattr(frame, 'sample_rate', None)}")
                 # Save audio to temp file
                 import tempfile
@@ -131,24 +149,18 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             sampbuffer = np.zeros([buffer_len], dtype=np.float32)
             transcripts = []
             for chunk in chunk_reader:
-                # Shift buffer and add new chunk
                 sampbuffer[:-chunk_len_samples] = sampbuffer[chunk_len_samples:]
                 sampbuffer[-chunk_len_samples:] = chunk
-                # Only transcribe the middle part (chunk) for best context
                 buffer_for_model = sampbuffer.copy()
-                # Model expects shape (batch, time)
                 input_tensor = torch.tensor(buffer_for_model, dtype=torch.float32).unsqueeze(0)
                 with torch.no_grad():
                     result = self.model.transcribe([input_tensor])[0]
                 transcripts.append(result.text)
-                # Yield partial transcription for this chunk
                 yield TranscriptionFrame(text=result.text, is_final=False)
-            # Merge all chunk transcriptions
             full_transcript = ' '.join(transcripts)
             yield TranscriptionFrame(text=full_transcript, is_final=True)
     rtvi = RTVIProcessor()
         
-    # Force model to load on CPU to avoid CUDA errors
     model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v3", map_location="cpu")
     model = model.to("cpu")
     stt = customSTTService(
@@ -180,18 +192,33 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     context = LLMContext(messages)
     context_aggregator = LLMContextAggregatorPair(context)
 
-    pipeline = Pipeline(
-        [
-            transport.input(),  
-            rtvi,
-            stt,  # Direct to STT
-            context_aggregator.user(),  # User responses
-            llm,  # LLM
-            tts,  # TTS
-            transport.output(),  # Transport bot output
-            context_aggregator.assistant(),  # Assistant spoken responses
-        ]
-    )
+    input_proc = transport.input()
+    logger.debug(f"Transport input: {input_proc}")
+    rtvi_proc = rtvi
+    logger.debug(f"RTVI: {rtvi_proc}")
+    user_agg = context_aggregator.user()
+    logger.debug(f"User aggregator: {user_agg}")
+    stt_proc = stt
+    logger.debug(f"STT: {stt_proc}")
+    llm_proc = llm
+    logger.debug(f"LLM: {llm_proc}")
+    tts_proc = tts
+    logger.debug(f"TTS: {tts_proc}")
+    transport_output = transport.output()
+    logger.debug(f"Transport bot output: {transport_output}")
+    context_aggregator.assistant = context_aggregator.assistant()
+    logger.debug(f"Assistant spoken responses: {context_aggregator.assistant}")
+
+    pipeline = Pipeline([
+        input_proc,
+        rtvi_proc,
+        user_agg,
+        stt_proc,
+        llm_proc,
+        tts_proc,
+        transport_output,
+        context_aggregator.assistant,
+    ])
 
     task = PipelineTask(
         pipeline,
@@ -200,13 +227,11 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_usage_metrics=True,
         ),
         observers=[],
-        observers=[],
     )
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info(f"Client connected")
-        # Kick off the conversation.
         messages.append({"role": "system", "content": "Say hello and briefly introduce yourself."})
         await task.queue_frames([LLMRunFrame()])
 
@@ -224,7 +249,6 @@ async def bot(runner_args: RunnerArguments):
     """Main bot entry point for the bot starter."""
 
     transport_params = {
-        # Removed Daily transport - using WebRTC instead (no Rust compiler needed)
         "webrtc": lambda: TransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
