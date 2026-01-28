@@ -2,6 +2,9 @@ import os
 import asyncio
 import numpy as np
 import whisper
+import asyncio
+import numpy as np
+import whisper
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -21,6 +24,8 @@ logger.info("✅ Silero VAD model loaded")
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import LLMRunFrame, Frame, AudioRawFrame, TranscriptionFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.frames.frames import LLMRunFrame, Frame, AudioRawFrame, TranscriptionFrame
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 logger.info("Loading pipeline components...")
 from pipecat.pipeline.pipeline import Pipeline
@@ -33,6 +38,7 @@ from pipecat.runner.utils import create_transport
 from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+import nemo.collections.asr as nemo_asr
 import nemo.collections.asr as nemo_asr
 logger.info("✅ All components loaded successfully!")
 
@@ -157,6 +163,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     from pipecat.services.openai.base_llm import BaseOpenAILLMService
 
     llm = OpenAILLMService(
+        
         api_key="ollama",  
         base_url="http://localhost:11434/v1",  # Ollama's API endpoint
         model="llama3.2:1b",  
@@ -192,6 +199,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        observers=[],
         observers=[],
     )
 
