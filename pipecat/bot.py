@@ -1,266 +1,253 @@
 import os
 import asyncio
 import numpy as np
-import whisper
-import asyncio
-import numpy as np
-import whisper
-
-from dotenv import load_dotenv
+import torch
+import datetime
 from loguru import logger
-print("🚀 Starting Pipecat bot...")
-print("⏳ Loading models and imports (20 seconds, first run only)\n")
-
-logger.info("Loading Local Smart Turn Analyzer V3...")
-from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
-from pipecat.processors.frameworks.rtvi import RTVIObserver, RTVIProcessor
-
-logger.info("✅ Local Smart Turn Analyzer V3 loaded")
-logger.info("Loading Silero VAD model...")
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-
-logger.info("✅ Silero VAD model loaded")
-
-from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import AudioRawFrame, TranscriptionFrame
-
-class Frame:
-    pass
-
-class LLMRunFrame(Frame):
-    pass
-
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-
-logger.info("Loading pipeline components...")
+from dotenv import load_dotenv
+from threading import Lock
+import queue
+import threading
+from scipy import signal
+import requests
+from flask import Flask, jsonify, render_template,request
+import nemo.collections.asr as nemo_asr
 from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.frames.frames import LLMRunFrame  
+from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
-from pipecat.runner.types import RunnerArguments
-from pipecat.runner.utils import create_transport
-from pipecat.services.deepgram.tts import DeepgramTTSService
-from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.openai import OpenAILLMService
+from pipecat.services.deepgram import DeepgramTTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-import nemo.collections.asr as nemo_asr
-import nemo.collections.asr as nemo_asr
-logger.info("✅ All components loaded successfully!")
+from flask_cors import CORS  # Import this!
+app = Flask(__name__)
+CORS(app)
+load_dotenv()
+origins = [
+    "http://localhost:3000",
+]
 
-async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+SR = 16_000
+CHUNK_SECONDS = 4
+CHUNK_SAMPLES = SR * CHUNK_SECONDS
+asr_lock = Lock()
 
-    # Define a simple customSTTService wrapper for the ASR model
+class SharedModel:
+    def __init__(self):
+        logger.info("Downloading Parakeet-TDT once …")
+        self.model = nemo_asr.models.ASRModel.from_pretrained(
+            model_name="nvidia/parakeet-tdt-0.6b-v2",
+            map_location="cpu",
+        ).eval()
+        with torch.inference_mode():
+            _ = self.model.transcribe([np.zeros(SR, dtype=np.float32)])
 
-    import soundfile as sf
-    import librosa
-    import torch
-    import time 
+shared_model = SharedModel()
 
-    class AudioChunkIterator:
-        def __init__(self, samples, chunk_len_in_secs, sample_rate):
-            self._samples = samples
-            self._chunk_len = int(chunk_len_in_secs * sample_rate)
-            self._start = 0
-            self.output = True
-        def __iter__(self):
-            return self
-        def __next__(self):
-            if not self.output:
-                raise StopIteration
-            last = int(self._start + self._chunk_len)
-            if last <= len(self._samples):
-                chunk = self._samples[self._start: last]
-                self._start = last
-            else:
-                chunk = np.zeros([int(self._chunk_len)], dtype='float32')
-                samp_len = len(self._samples) - self._start
-                chunk[0:samp_len] = self._samples[self._start:len(self._samples)]
-                self.output = False
-            return chunk
+class SimpleNemoSTT(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model.eval()
 
+    async def setup(self, params):
+        """
+        Asynchronous setup method to satisfy the Pipeline's requirements.
+        """
+        await asyncio.sleep(0)  # Placeholder awaitable
 
-    class customSTTService(FrameProcessor):
-        def __init__(self, model, sample_rate=16000, chunk_len_in_secs=15, context_len_in_secs=2):
-            super().__init__()
-            self.model = model
-            self.sample_rate = sample_rate
-            self.chunk_len_in_secs = chunk_len_in_secs
-            self.context_len_in_secs = context_len_in_secs
-            self.audio_frame_count = 0
-            self.last_log_time = None
+    def link(self, next_processor):
+        """
+        Placeholder link method to satisfy the Pipeline's requirements.
+        """
+        pass
 
-        def link(self, next_processor):
-            self._next = next_processor
+    def transcribe(self, audio_bytes):
+        """
+        Transcribe audio using the ASR model.
+        """
+        audio_fp32 = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        audio_tensor = torch.tensor(audio_fp32).unsqueeze(0)
 
-        async def process(self, frame, direction="forward"):
-            from loguru import logger
-            logger.info(f"[RTVI] Received frame: {type(frame).__name__}")
-            # Log all attributes for debugging
-            for attr in dir(frame):
-                if not attr.startswith("_"):
-                    try:
-                        logger.debug(f"  frame.{attr} = {getattr(frame, attr)}")
-                    except Exception:
-                        pass
-            if isinstance(frame, AudioRawFrame):
-                logger.info(f"[AUDIO FRAME] Received AudioRawFrame: sample_rate={getattr(frame, 'sample_rate', None)}, samples_shape={getattr(frame, 'samples', None).shape if hasattr(frame, 'samples') else 'N/A'}")
-                self.audio_frame_count += 1
-                now = time.time()
-                if self.last_log_time is None:
-                    self.last_log_time = now
-                # Log every 10 frames or every 10 seconds
-                if self.audio_frame_count % 10 == 0 or (now - self.last_log_time) > 10:
-                    logger.info(f"Received {self.audio_frame_count} AudioRawFrame(s) in the last {int(now - self.last_log_time)} seconds.")
-                    self.last_log_time = now
-                    self.audio_frame_count = 0
-                logger.debug(f"AudioRawFrame received: samples shape={getattr(frame, 'samples', None).shape if hasattr(frame, 'samples') else 'N/A'}, sample_rate={getattr(frame, 'sample_rate', None)}")
-                # Save audio to temp file
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-                    sf.write(tmp.name, frame.samples, frame.sample_rate)
-                    tmp_path = tmp.name
-                async for tframe in self.run_stt(tmp_path):
-                    logger.debug(f"Yielding TranscriptionFrame: {tframe.text}")
-                    await self._next.process(tframe, direction)
-            else:
-                logger.debug("Non-audio frame received, passing through.")
-                await self._next.process(frame, direction)
+        with torch.inference_mode():
+            hypotheses = self.model.transcribe(tokens_list=[audio_tensor])
+            return hypotheses[0] if hypotheses else ""
 
-        def get_samples(self, audio_file, target_sr=16000):
-            with sf.SoundFile(audio_file, 'r') as f:
-                sample_rate = f.samplerate
-                samples = f.read()
-                if sample_rate != target_sr:
-                    samples = librosa.core.resample(samples, orig_sr=sample_rate, target_sr=target_sr)
-                samples = samples.transpose()
-                return samples
+    async def queue_frame(self, frame, *args, **kwargs):
+        """
+        Asynchronous queue_frame method to handle frames and satisfy the Pipeline's requirements.
+        """
+        await asyncio.sleep(0)  
 
-        async def run_stt(self, audio_file):
-            # audio_file: path to .wav file
-            samples = self.get_samples(audio_file, self.sample_rate)
-            chunk_len = self.chunk_len_in_secs
-            context_len = self.context_len_in_secs
-            buffer_len_in_secs = chunk_len + 2 * context_len
-            buffer_len = int(self.sample_rate * buffer_len_in_secs)
-            chunk_reader = AudioChunkIterator(samples, chunk_len, self.sample_rate)
-            chunk_len_samples = int(self.sample_rate * chunk_len)
-            context_len_samples = int(self.sample_rate * context_len)
-            sampbuffer = np.zeros([buffer_len], dtype=np.float32)
-            transcripts = []
-            for chunk in chunk_reader:
-                sampbuffer[:-chunk_len_samples] = sampbuffer[chunk_len_samples:]
-                sampbuffer[-chunk_len_samples:] = chunk
-                buffer_for_model = sampbuffer.copy()
-                input_tensor = torch.tensor(buffer_for_model, dtype=torch.float32).unsqueeze(0)
-                with torch.no_grad():
-                    result = self.model.transcribe([input_tensor])[0]
-                transcripts.append(result.text)
-                yield TranscriptionFrame(text=result.text, is_final=False)
-            full_transcript = ' '.join(transcripts)
-            yield TranscriptionFrame(text=full_transcript, is_final=True)
-    rtvi = RTVIProcessor()
-        
-    model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v3", map_location="cpu")
-    model = model.to("cpu")
-    stt = customSTTService(
-        model = model
-    )
+    @app.route('/process', methods=['POST'])
+    async def process_audio(self):
+        """
+        Flask route to process audio input and return transcription.
+        """
+        audio_bytes = request.data
+        transcription = self.transcribe(audio_bytes)
+        return jsonify({"transcription": transcription})
 
-    tts = DeepgramTTSService(
-        api_key=os.getenv("DEEPGRAM_API_KEY"),
-        voice="aura-asteria-en",  # Natural female voice
-    )
+async def main():
+    
+    transport = LocalAudioTransport(LocalAudioTransportParams(audio_in_sample_rate=16000))
+    
+    logger.info("Loading NeMo...")
+    model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v3")
+    
+    stt = SimpleNemoSTT(model=model)
+    llm = OpenAILLMService(api_key="ollama", base_url="http://localhost:11434/v1", model="llama3.2:1b")
+    tts = DeepgramTTSService(api_key=os.getenv("DEEPGRAM_API_KEY"), voice="aura-asteria-en")
 
-    from pipecat.services.openai.base_llm import BaseOpenAILLMService
-
-    llm = OpenAILLMService(
-        
-        api_key="ollama",  
-        base_url="http://localhost:11434/v1",  # Ollama's API endpoint
-        model="llama3.2:1b",  
-        params=BaseOpenAILLMService.InputParams(max_tokens=2048)
-    )
-
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a friendly AI assistant. Respond naturally and keep your answers conversational.",
-        },
-    ]
-
-    context = LLMContext(messages)
+    messages = [{"role": "system", "content": "You are a helpful AI. Keep it brief."}]
+    context = OpenAILLMContext(messages)
     context_aggregator = LLMContextAggregatorPair(context)
 
-    input_proc = transport.input()
-    logger.debug(f"Transport input: {input_proc}")
-    rtvi_proc = rtvi
-    logger.debug(f"RTVI: {rtvi_proc}")
-    user_agg = context_aggregator.user()
-    logger.debug(f"User aggregator: {user_agg}")
-    stt_proc = stt
-    logger.debug(f"STT: {stt_proc}")
-    llm_proc = llm
-    logger.debug(f"LLM: {llm_proc}")
-    tts_proc = tts
-    logger.debug(f"TTS: {tts_proc}")
-    transport_output = transport.output()
-    logger.debug(f"Transport bot output: {transport_output}")
-    context_aggregator.assistant = context_aggregator.assistant()
-    logger.debug(f"Assistant spoken responses: {context_aggregator.assistant}")
-
     pipeline = Pipeline([
-        input_proc,
-        rtvi_proc,
-        user_agg,
-        stt_proc,
-        llm_proc,
-        tts_proc,
-        transport_output,
-        context_aggregator.assistant,
+        transport.input(),
+        stt,
+        context_aggregator.user(),
+        llm,
+        tts,
+        transport.output(),
+        context_aggregator.assistant(),
     ])
 
-    task = PipelineTask(
-        pipeline,
-        params=PipelineParams(
-            enable_metrics=True,
-            enable_usage_metrics=True,
-        ),
-        observers=[],
-    )
+    task = PipelineTask(pipeline)
 
-    @transport.event_handler("on_client_connected")
-    async def on_client_connected(transport, client):
-        logger.info(f"Client connected")
-        messages.append({"role": "system", "content": "Say hello and briefly introduce yourself."})
+    @transport.event_handler("on_start")
+    async def on_start(transport):
         await task.queue_frames([LLMRunFrame()])
 
-    @transport.event_handler("on_client_disconnected")
-    async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
-        await task.cancel()
-
-    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-
+    runner = PipelineRunner()
     await runner.run(task)
 
+class ASRSession:
+    def __init__(self):
+        self.audio_q = queue.Queue(maxsize=8)
+        self.txt_q = queue.Queue()
+        self.transcripts = []
+        self.active = True
+        threading.Thread(target=self._worker, daemon=True).start()
 
-async def bot(runner_args: RunnerArguments):
-    """Main bot entry point for the bot starter."""
+    def close(self):
+        self.active = False
+        self.audio_q.put(None)
 
-    transport_params = {
-        "webrtc": lambda: TransportParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-        ),
+    def _worker(self):
+        buf = np.array([], dtype=np.float32)
+        while self.active:
+            try:
+                while len(buf) < CHUNK_SAMPLES and self.active:
+                    audio_chunk = self.audio_q.get()
+                    if audio_chunk is None:
+                        self.active = False
+                        break
+                    buf = np.concatenate([buf, audio_chunk])
+                if not self.active:
+                    break
+                while len(buf) >= CHUNK_SAMPLES and self.active:
+                    chunk, buf = buf[:CHUNK_SAMPLES], buf[CHUNK_SAMPLES:]
+                    with torch.inference_mode():
+                        with asr_lock:
+                            out = shared_model.model.transcribe([chunk])
+                    self.txt_q.put(out[0].text)
+            except Exception as e:
+                logger.error(f"ASR error: {e}")
+        while not self.txt_q.empty():
+            self.txt_q.get()
+
+    def preprocess(self, audio):
+        sr, y = audio
+        if y.ndim > 1:
+            y = y.mean(axis=1)
+        if sr != SR:
+            y = signal.resample_poly(y, SR, sr)
+        y = y.astype(np.float32)
+        y /= (np.abs(y).max() + 1e-9)
+        return y
+
+def stream_fn(audio, state: ASRSession):
+    if state.active:
+        state.audio_q.put(state.preprocess(audio))
+    while not state.txt_q.empty():
+        text = state.txt_q.get()
+        state.transcripts.append(text)
+    return (
+        " ".join(state.transcripts) if state.transcripts else "…listening…",
+        state,
+    )
+
+def send_to_flask(audio, state):
+    # Convert audio to bytes
+    audio_bytes = audio[1].astype(np.int16).tobytes()
+    try:
+        # Send audio to Flask endpoint
+        response = requests.post("http://127.0.0.1:5000/process", data=audio_bytes)
+        if response.status_code == 200:
+            transcription = response.text
+            state.transcripts.append(transcription)
+        else:
+            logger.error(f"Flask error: {response.status_code}")
+    except Exception as e:
+        logger.error(f"Request error: {e}")
+    return (
+        " ".join(state.transcripts) if state.transcripts else "…listening…",
+        state,
+    )
+
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/start', methods=['POST', 'OPTIONS'])
+def start():
+    # Generate a new LiveKit room URL
+    room_url = create_livekit_room()
+    if not room_url:
+        return jsonify({"message": "Failed to create room"}), 500
+
+    return jsonify({"message": "Started", "room_url": room_url}), 200
+
+def create_livekit_room():
+    """
+    Create a new LiveKit room using the LiveKit API.
+    """
+    headers = {
+        "Authorization": f"Bearer {LIVEKIT_API_KEY}:{LIVEKIT_API_SECRET}",
+        "Content-Type": "application/json",
     }
+    payload = {
+        "name": f"room-{int(datetime.datetime.now().timestamp())}",
+        "empty_timeout": 300,  # Room expires after 5 minutes of inactivity
+        "max_participants": 10
+    }
+    response = requests.post(f"{LIVEKIT_BASE_URL}/rooms", headers=headers, json=payload)
+    if response.status_code == 200:
+        return response.json().get("url")
+    else:
+        logger.error(f"Failed to create LiveKit room: {response.text}")
+        return None
 
-    transport = await create_transport(runner_args, transport_params)
+LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY")
+LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET")
+LIVEKIT_BASE_URL = "https://your-livekit-server-url"
 
-    await run_bot(transport, runner_args)
-
-
+def run_flask():
+    # Run Flask on port 8080 to match your frontend's request
+    app.run(host="127.0.0.1", port=8080, debug=False, use_reloader=False)
 if __name__ == "__main__":
-    from pipecat.runner.run import main
-
-    main()
+    # 1. Start Flask in a background thread
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    # 2. Start the Pipecat Pipeline in the main thread
+    try:
+        logger.info("Starting Pipecat Pipeline...")
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Pipeline stopped.")
