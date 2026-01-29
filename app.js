@@ -55,16 +55,24 @@ class PipecatClient {
                     config: []
                 })
             });
-            
+
             if (!response.ok) {
                 throw new Error(`Failed to start bot session: ${response.statusText}`);
             }
-            
+
             const data = await response.json();
-            
-            if (!data.room_url) {
+
+            // Log the response data for debugging
+            console.log('Response from /start:', data);
+
+            // Check for room_url or fallback to url
+            const roomUrl = data.room_url || data.url;
+            if (!roomUrl) {
                 throw new Error('No room URL received from bot');
             }
+
+            // Log the roomUrl before joining
+            console.log('Joining room with URL:', roomUrl);
             
             // Create Daily call frame
             this.callFrame = window.DailyIframe.createCallObject({
@@ -106,8 +114,13 @@ class PipecatClient {
                 });
             
             // Join the room
-            await this.callFrame.join({ url: data.room_url });
-            
+            try {
+                await this.callFrame.join({ url: roomUrl });
+            } catch (joinError) {
+                console.error('Error during DailyIframe.join():', joinError);
+                throw new Error(`Failed to join room: ${joinError.message || 'Unknown error'}`);
+            }
+
         } catch (error) {
             console.error('Connection error:', error);
             this.showError(error.message);

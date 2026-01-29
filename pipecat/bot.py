@@ -208,62 +208,64 @@ def send_to_flask(audio, state):
 def index():
     return render_template('index.html')
 
+def generate_livekit_token(room_name):
+    """
+    Generates the JWT token (hall pass) the browser needs to join.
+    No async network calls required!
+    """
+    try:
+        # Log the API key and secret for debugging
+        logger.info(f"LIVEKIT_API_KEY: {LIVEKIT_API_KEY}")
+        logger.info(f"LIVEKIT_API_SECRET: {LIVEKIT_API_SECRET}")
+
+        grant = api.VideoGrants(
+            room_join=True,
+            room=room_name,
+        )
+        access_token = api.AccessToken(
+            LIVEKIT_API_KEY,
+            LIVEKIT_API_SECRET,
+        ).with_grants(grant).with_identity(f"user-{int(datetime.datetime.now().timestamp())}")
+
+        # Generate and return the token
+        token = access_token.to_jwt()
+        logger.info(f"Generated Token: {token}")
+        return token
+    except Exception as e:
+        logger.error(f"Token generation failed: {e}")
+        return None
+
 @app.route('/start', methods=['POST', 'OPTIONS'])
 def start():
     if request.method == 'OPTIONS':
-        # Handle CORS preflight request
         return jsonify({"message": "CORS preflight successful"}), 200
 
-    # Generate a new LiveKit room URL
-    room_url = create_livekit_room()
-    if not room_url:
-        return jsonify({"message": "Failed to create room"}), 500
+    try:
+        room_name = f"room-{int(datetime.datetime.now().timestamp())}"
+        token = generate_livekit_token(room_name)
 
-    return jsonify({"message": "Started", "room_url": room_url}), 200
+        # Validate LIVEKIT_URL
+        livekit_url = os.getenv("LIVEKIT_URL", "https://livekit.cloud")
+        if not livekit_url.startswith("https://"):
+            logger.error(f"Invalid LIVEKIT_URL: {livekit_url}")
+            raise ValueError("LIVEKIT_URL must start with 'https://'")
 
-def create_livekit_room():
-    """
-    Create a new LiveKit room using the official SDK.
-    """
-    import aiohttp
+        # Convert https:// to wss:// for the connection
+        wss_url = livekit_url.replace("https://", "wss://")
 
-    # Initialize the RoomService
-    # Note: ensure LIVEKIT_BASE_URL starts with https://
-    async def initialize_room_service():
-        async with aiohttp.ClientSession() as session:
-            room_service = api.room_service.RoomService(
-                session=session,
-                url=LIVEKIT_BASE_URL,
-                api_key=LIVEKIT_API_KEY,
-                api_secret=LIVEKIT_API_SECRET
-            )
+        # Log the response data for debugging
+        response_data = {
+            "room_name": room_name,
+            "token": token,
+            "url": wss_url,
+            "room_url": wss_url
+        }
+        logger.info(f"Response Data: {response_data}")
 
-            try:
-                # Define room options
-                room_name = f"room-{int(datetime.datetime.now().timestamp())}"
-                
-                # Method: Create Room
-                # This returns a Room object if successful
-                room = await room_service.create_room(
-                    api.room_service.CreateRoomRequest(
-                        name=room_name,
-                        empty_timeout=300,
-                        max_participants=10
-                    )
-                )
-                
-                logger.info(f"Room created successfully: {room.name}")
-                
-                # Important: The API usually returns room details, 
-                # but the frontend needs a TOKEN to join, not just the URL.
-                return room.name
-
-            except Exception as e:
-                logger.error(f"Exception while creating LiveKit room: {e}")
-                return None
-
-    import asyncio
-    asyncio.run(initialize_room_service())
+        return jsonify(response_data), 200
+    except Exception as e:
+        logger.error(f"Start route failed: {e}")
+        return jsonify({"error": str(e)}), 500
 
 LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET")
 LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY")
@@ -271,13 +273,15 @@ LIVEKIT_BASE_URL = os.getenv("LIVEKIT_URL", "https://livekit.cloud")
 
 def run_flask():
     # Run Flask on port 8080 to match your frontend's request
-    app.run(host="127.0.0.1", port=8080, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
     
 if __name__ == "__main__":
-    # 1. Start Flask in a background thread
-    create_livekit_room()  # Test room creation at startup
-    threading.Thread(target=run_flask, daemon=True).start
-    # 2. Start the Pipecat Pipeline in the main thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    import time
+    time.sleep(2) 
+    
     try:
         logger.info("Starting Pipecat Pipeline...")
         asyncio.run(main())
