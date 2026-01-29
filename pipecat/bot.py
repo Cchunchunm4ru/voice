@@ -6,6 +6,7 @@ import datetime
 from loguru import logger
 from dotenv import load_dotenv
 from threading import Lock
+from livekit import api
 import queue
 import threading
 from scipy import signal
@@ -26,11 +27,13 @@ from pipecat.services.deepgram import DeepgramTTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from flask_cors import CORS  # Import this!
 app = Flask(__name__)
-CORS(app)
 load_dotenv()
 origins = [
     "http://localhost:3000",
 ]
+
+CORS(app, resources={r"/*": {"origins": origins}})
+load_dotenv()
 
 SR = 16_000
 CHUNK_SECONDS = 4
@@ -207,6 +210,10 @@ def index():
 
 @app.route('/start', methods=['POST', 'OPTIONS'])
 def start():
+    if request.method == 'OPTIONS':
+        # Handle CORS preflight request
+        return jsonify({"message": "CORS preflight successful"}), 200
+
     # Generate a new LiveKit room URL
     room_url = create_livekit_room()
     if not room_url:
@@ -216,35 +223,60 @@ def start():
 
 def create_livekit_room():
     """
-    Create a new LiveKit room using the LiveKit API.
+    Create a new LiveKit room using the official SDK.
     """
-    headers = {
-        "Authorization": f"Bearer {LIVEKIT_API_KEY}:{LIVEKIT_API_SECRET}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "name": f"room-{int(datetime.datetime.now().timestamp())}",
-        "empty_timeout": 300,  # Room expires after 5 minutes of inactivity
-        "max_participants": 10
-    }
-    response = requests.post(f"{LIVEKIT_BASE_URL}/rooms", headers=headers, json=payload)
-    if response.status_code == 200:
-        return response.json().get("url")
-    else:
-        logger.error(f"Failed to create LiveKit room: {response.text}")
-        return None
+    import aiohttp
 
-LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY")
+    # Initialize the RoomService
+    # Note: ensure LIVEKIT_BASE_URL starts with https://
+    async def initialize_room_service():
+        async with aiohttp.ClientSession() as session:
+            room_service = api.room_service.RoomService(
+                session=session,
+                url=LIVEKIT_BASE_URL,
+                api_key=LIVEKIT_API_KEY,
+                api_secret=LIVEKIT_API_SECRET
+            )
+
+            try:
+                # Define room options
+                room_name = f"room-{int(datetime.datetime.now().timestamp())}"
+                
+                # Method: Create Room
+                # This returns a Room object if successful
+                room = await room_service.create_room(
+                    api.room_service.CreateRoomRequest(
+                        name=room_name,
+                        empty_timeout=300,
+                        max_participants=10
+                    )
+                )
+                
+                logger.info(f"Room created successfully: {room.name}")
+                
+                # Important: The API usually returns room details, 
+                # but the frontend needs a TOKEN to join, not just the URL.
+                return room.name
+
+            except Exception as e:
+                logger.error(f"Exception while creating LiveKit room: {e}")
+                return None
+
+    import asyncio
+    asyncio.run(initialize_room_service())
+
 LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET")
-LIVEKIT_BASE_URL = "https://your-livekit-server-url"
+LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY")
+LIVEKIT_BASE_URL = os.getenv("LIVEKIT_URL", "https://livekit.cloud")
 
 def run_flask():
     # Run Flask on port 8080 to match your frontend's request
     app.run(host="127.0.0.1", port=8080, debug=False, use_reloader=False)
+    
 if __name__ == "__main__":
     # 1. Start Flask in a background thread
-    threading.Thread(target=run_flask, daemon=True).start()
-    
+    create_livekit_room()  # Test room creation at startup
+    threading.Thread(target=run_flask, daemon=True).start
     # 2. Start the Pipecat Pipeline in the main thread
     try:
         logger.info("Starting Pipecat Pipeline...")

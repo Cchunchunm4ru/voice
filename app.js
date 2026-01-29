@@ -46,7 +46,7 @@ class PipecatClient {
             this.connectBtn.disabled = true;
             
             // Request room URL from the bot
-            const response = await fetch('http://localhost:7860/start', {
+            const response = await fetch('http://127.0.0.1:8080/start', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
