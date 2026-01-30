@@ -122,9 +122,11 @@ async def main():
 
     task = PipelineTask(pipeline)
 
-    @transport.event_handler("on_start")
     async def on_start(transport):
         await task.queue_frames([LLMRunFrame()])
+
+    # Register the event handler on the task, not the transport
+    task.add_event_handler("on_start", on_start)
 
     runner = PipelineRunner()
     await runner.run(task)
@@ -243,25 +245,18 @@ def start():
     try:
         room_name = f"room-{int(datetime.datetime.now().timestamp())}"
         token = generate_livekit_token(room_name)
-
-        # Validate LIVEKIT_URL
-        livekit_url = os.getenv("LIVEKIT_URL", "https://livekit.cloud")
-        if not livekit_url.startswith("https://"):
-            logger.error(f"Invalid LIVEKIT_URL: {livekit_url}")
-            raise ValueError("LIVEKIT_URL must start with 'https://'")
-
+        
         # Convert https:// to wss:// for the connection
-        wss_url = livekit_url.replace("https://", "wss://")
+        wss_url = LIVEKIT_BASE_URL.replace("https://", "wss://")
 
-        # Log the response data for debugging
+        # We provide BOTH formats to be safe
         response_data = {
             "room_name": room_name,
             "token": token,
             "url": wss_url,
-            "room_url": wss_url
+            "room_url": wss_url  # <--- This is what your app.js is looking for!
         }
-        logger.info(f"Response Data: {response_data}")
-
+        
         return jsonify(response_data), 200
     except Exception as e:
         logger.error(f"Start route failed: {e}")

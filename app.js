@@ -1,14 +1,11 @@
-/**
- * Pipecat Voice AI Bot Frontend
- * Connects to the Pipecat bot using Daily.co WebRTC transport
- */
+// No import statement at the top!
 
 class PipecatClient {
     constructor() {
-        this.callFrame = null;
+        this.room = null;
         this.isMuted = false;
         this.isConnected = false;
-        
+
         // UI Elements
         this.statusEl = document.getElementById('status');
         this.connectBtn = document.getElementById('connectBtn');
@@ -17,21 +14,21 @@ class PipecatClient {
         this.audioBars = document.getElementById('audioBars');
         this.idleText = document.getElementById('idleText');
         this.errorMessage = document.getElementById('errorMessage');
-        
+
         this.setupEventListeners();
     }
-    
+
     setupEventListeners() {
         this.connectBtn.addEventListener('click', () => this.connect());
         this.disconnectBtn.addEventListener('click', () => this.disconnect());
         this.muteBtn.addEventListener('click', () => this.toggleMute());
     }
-    
+
     updateStatus(status, className) {
         this.statusEl.textContent = status;
         this.statusEl.className = `status ${className}`;
     }
-    
+
     showError(message) {
         this.errorMessage.textContent = message;
         this.errorMessage.classList.remove('hidden');
@@ -39,13 +36,13 @@ class PipecatClient {
             this.errorMessage.classList.add('hidden');
         }, 5000);
     }
-    
+
     async connect() {
         try {
             this.updateStatus('Connecting...', 'connecting');
             this.connectBtn.disabled = true;
-            
-            // Request room URL from the bot
+
+            // Request room URL and token from the bot
             const response = await fetch('http://127.0.0.1:8080/start', {
                 method: 'POST',
                 headers: {
@@ -61,29 +58,23 @@ class PipecatClient {
             }
 
             const data = await response.json();
-
-            // Log the response data for debugging
             console.log('Response from /start:', data);
 
-            // Check for room_url or fallback to url
             const roomUrl = data.room_url || data.url;
-            if (!roomUrl) {
-                throw new Error('No room URL received from bot');
+            const token = data.token;
+            if (!roomUrl || !token) {
+                throw new Error('No room URL or token received from bot');
             }
 
-            // Log the roomUrl before joining
-            console.log('Joining room with URL:', roomUrl);
-            
-            // Create Daily call frame
-            this.callFrame = window.DailyIframe.createCallObject({
-                audioSource: true,
-                videoSource: false,
-            });
-            
-            // Set up call frame event listeners
-            this.callFrame
-                .on('joined-meeting', () => {
-                    console.log('Joined meeting');
+            console.log('Joining LiveKit room with URL:', roomUrl);
+
+            // Use livekit from the CDN (all lowercase)
+            this.room = new window.livekit.Room();
+            const RoomEvent = window.livekit.RoomEvent;
+
+            this.room
+                .on(RoomEvent.Connected, () => {
+                    console.log('Connected to LiveKit room');
                     this.isConnected = true;
                     this.updateStatus('Connected - Speak now!', 'connected');
                     this.connectBtn.classList.add('hidden');
@@ -94,32 +85,31 @@ class PipecatClient {
                     this.idleText.classList.add('hidden');
                     this.audioBars.classList.remove('hidden');
                 })
-                .on('left-meeting', () => {
-                    console.log('Left meeting');
+                .on(RoomEvent.Disconnected, () => {
+                    console.log('Disconnected from LiveKit room');
                     this.handleDisconnect();
                 })
-                .on('error', (error) => {
-                    console.error('Daily error:', error);
-                    this.showError(`Connection error: ${error.errorMsg || 'Unknown error'}`);
+                .on(RoomEvent.ParticipantConnected, (participant) => {
+                    console.log('Participant joined:', participant.identity);
+                })
+                .on(RoomEvent.ParticipantDisconnected, (participant) => {
+                    console.log('Participant left:', participant.identity);
+                })
+                .on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+                    console.log('Track started:', track.kind);
+                })
+                .on(RoomEvent.ConnectionError, (error) => {
+                    console.error('LiveKit connection error:', error);
+                    this.showError(`Connection error: ${error.message || 'Unknown error'}`);
                     this.handleDisconnect();
-                })
-                .on('participant-joined', (event) => {
-                    console.log('Participant joined:', event.participant);
-                })
-                .on('participant-left', (event) => {
-                    console.log('Participant left:', event.participant);
-                })
-                .on('track-started', (event) => {
-                    console.log('Track started:', event.track.kind);
                 });
-            
-            // Join the room
-            try {
-                await this.callFrame.join({ url: roomUrl });
-            } catch (joinError) {
-                console.error('Error during DailyIframe.join():', joinError);
-                throw new Error(`Failed to join room: ${joinError.message || 'Unknown error'}`);
-            }
+
+            // Connect with audio only
+            await this.room.connect(roomUrl, token, {
+                autoSubscribe: true,
+                audio: true,
+                video: false,
+            });
 
         } catch (error) {
             console.error('Connection error:', error);
@@ -127,22 +117,21 @@ class PipecatClient {
             this.handleDisconnect();
         }
     }
-    
+
     async disconnect() {
-        if (this.callFrame) {
+        if (this.room) {
             try {
-                await this.callFrame.leave();
-                await this.callFrame.destroy();
+                await this.room.disconnect();
             } catch (error) {
                 console.error('Error during disconnect:', error);
             }
         }
         this.handleDisconnect();
     }
-    
+
     handleDisconnect() {
         this.isConnected = false;
-        this.callFrame = null;
+        this.room = null;
         this.updateStatus('Disconnected', 'disconnected');
         this.connectBtn.classList.remove('hidden');
         this.connectBtn.disabled = false;
@@ -150,20 +139,20 @@ class PipecatClient {
         this.muteBtn.classList.add('hidden');
         this.audioBars.classList.add('hidden');
         this.idleText.classList.remove('hidden');
-        
+
         if (this.isMuted) {
             this.isMuted = false;
             this.muteBtn.textContent = 'Mute Microphone';
             this.muteBtn.className = 'btn-mute';
         }
     }
-    
+
     toggleMute() {
-        if (!this.callFrame || !this.isConnected) return;
-        
+        if (!this.room || !this.isConnected) return;
+
         this.isMuted = !this.isMuted;
-        this.callFrame.setLocalAudio(!this.isMuted);
-        
+        this.room.localParticipant.setMicrophoneEnabled(!this.isMuted);
+
         if (this.isMuted) {
             this.muteBtn.textContent = 'Unmute Microphone';
             this.muteBtn.className = 'btn-unmute';
