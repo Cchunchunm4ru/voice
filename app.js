@@ -1,4 +1,3 @@
-// No import statement at the top!
 
 class PipecatClient {
     constructor() {
@@ -39,42 +38,37 @@ class PipecatClient {
 
     async connect() {
         try {
+            // 1. Check if the SDK exists under the correct name
+            const SDK = window.LiveKitClient;
+            if (!SDK) {
+                throw new Error('LiveKit SDK not found. Ensure the script tag is working.');
+            }
+
             this.updateStatus('Connecting...', 'connecting');
             this.connectBtn.disabled = true;
 
-            // Request room URL and token from the bot
+            // 2. Fetch connection details from your Pipecat bot
             const response = await fetch('http://127.0.0.1:8080/start', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    config: []
-                })
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ config: [] })
             });
 
-            if (!response.ok) {
-                throw new Error(`Failed to start bot session: ${response.statusText}`);
-            }
+            if (!response.ok) throw new Error(`Bot session failed: ${response.statusText}`);
 
             const data = await response.json();
-            console.log('Response from /start:', data);
-
             const roomUrl = data.room_url || data.url;
             const token = data.token;
-            if (!roomUrl || !token) {
-                throw new Error('No room URL or token received from bot');
-            }
 
-            console.log('Joining LiveKit room with URL:', roomUrl);
+            if (!roomUrl || !token) throw new Error('Missing room URL or token');
 
-            // Use livekit from the CDN (all lowercase)
-            this.room = new window.livekit.Room();
-            const RoomEvent = window.livekit.RoomEvent;
+            // 3. Initialize the Room using the correct UMD global
+            this.room = new SDK.Room();
+            const RoomEvent = SDK.RoomEvent;
 
+            // 4. Setup Event Listeners
             this.room
                 .on(RoomEvent.Connected, () => {
-                    console.log('Connected to LiveKit room');
                     this.isConnected = true;
                     this.updateStatus('Connected - Speak now!', 'connected');
                     this.connectBtn.classList.add('hidden');
@@ -85,26 +79,13 @@ class PipecatClient {
                     this.idleText.classList.add('hidden');
                     this.audioBars.classList.remove('hidden');
                 })
-                .on(RoomEvent.Disconnected, () => {
-                    console.log('Disconnected from LiveKit room');
-                    this.handleDisconnect();
-                })
-                .on(RoomEvent.ParticipantConnected, (participant) => {
-                    console.log('Participant joined:', participant.identity);
-                })
-                .on(RoomEvent.ParticipantDisconnected, (participant) => {
-                    console.log('Participant left:', participant.identity);
-                })
-                .on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
-                    console.log('Track started:', track.kind);
-                })
+                .on(RoomEvent.Disconnected, () => this.handleDisconnect())
                 .on(RoomEvent.ConnectionError, (error) => {
-                    console.error('LiveKit connection error:', error);
-                    this.showError(`Connection error: ${error.message || 'Unknown error'}`);
+                    this.showError(`LiveKit error: ${error.message}`);
                     this.handleDisconnect();
                 });
 
-            // Connect with audio only
+            // 5. Connect to the room
             await this.room.connect(roomUrl, token, {
                 autoSubscribe: true,
                 audio: true,

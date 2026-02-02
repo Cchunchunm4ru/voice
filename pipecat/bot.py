@@ -24,10 +24,18 @@ from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.services.openai import OpenAILLMService
 from pipecat.services.deepgram import DeepgramTTSService
-from pipecat.transports.base_transport import BaseTransport, TransportParams
-from flask_cors import CORS  # Import this!
-app = Flask(__name__)
+from pipecat.transports.services.livekit import LiveKitTransport
+from flask_cors import CORS 
+from livekit import api
 load_dotenv()
+# Generate token
+token = api.AccessToken(os.getenv("LIVEKIT_API_KEY"), os.getenv("LIVEKIT_API_SECRET")) \
+    .with_identity("bot-user") \
+    .with_grants(api.VideoGrants(room_join=True, room="my-room-name")) \
+    .to_jwt()
+    
+app = Flask(__name__)
+
 origins = [
     "http://localhost:3000",
 ]
@@ -97,7 +105,12 @@ class SimpleNemoSTT(torch.nn.Module):
 
 async def main():
     
-    transport = LocalAudioTransport(LocalAudioTransportParams(audio_in_sample_rate=16000))
+    
+    transport = LiveKitTransport(
+    url="wss://vishnu-suigvvay.livekit.cloud", # Or your LiveKit Cloud URL
+    token=token,
+    room_name="my-room-name"
+    )
     
     logger.info("Loading NeMo...")
     model = nemo_asr.models.ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v3")
